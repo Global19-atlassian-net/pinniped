@@ -35,18 +35,39 @@ func TestImpersonationProxy(t *testing.T) {
 	defer cancel()
 
 	// Create a client using the admin kubeconfig.
-	// adminClient := library.NewClientset(t)
+	adminClient := library.NewKubernetesClientset(t)
 
 	// Create a WebhookAuthenticator.
 	authenticator := library.CreateTestWebhookAuthenticator(ctx, t)
 
 	// Find the address of the ClusterIP service.
-	proxyServiceURL := fmt.Sprintf("https://%s-proxy.%s.svc.cluster.local", env.ConciergeAppName, env.ConciergeNamespace)
+	proxyServiceHostname := fmt.Sprintf("%s-proxy.%s.svc.cluster.local", env.ConciergeAppName, env.ConciergeNamespace)
+	proxyServiceURL := "https://" + proxyServiceHostname
 	t.Logf("making kubeconfig that points to %q", proxyServiceURL)
+
+	// TODO don't hardcode the LoadBalancer name
+	// TODO wait for the load balancer to appear
+	loadBalancer, err := adminClient.CoreV1().Services(env.ConciergeNamespace).Get(ctx, "impersonation-proxy-load-balancer", metav1.GetOptions{})
+	require.NoError(t, err)
+
+	if !env.HasCapability(library.HasExternalLoadBalancerProvider) {
+		loadBalancer.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{{Hostname: proxyServiceHostname}}
+		_, err := adminClient.CoreV1().Services(env.ConciergeNamespace).Update(ctx, loadBalancer, metav1.UpdateOptions{})
+		require.NoError(t, err)
+	}
+
+	// TODO don't hardcode the secret name
+	// TODO wait for the secret to appear
+	// TODO read the CA data from the WebhookAuthenticator status instead
+	caSecret, err := adminClient.CoreV1().Secrets(env.ConciergeNamespace).Get(ctx, "impersonation-proxy-ca", metav1.GetOptions{})
+	require.NoError(t, err)
+
+	ca := caSecret.Data["caCertificate"]
+	require.NotNil(t, ca)
 
 	kubeconfig := &rest.Config{
 		Host:            proxyServiceURL,
-		TLSClientConfig: rest.TLSClientConfig{Insecure: true},
+		TLSClientConfig: rest.TLSClientConfig{CAData: ca},
 		BearerToken:     makeImpersonationTestToken(t, authenticator),
 		Proxy: func(req *http.Request) (*url.URL, error) {
 			proxyURL, err := url.Parse(env.Proxy)
